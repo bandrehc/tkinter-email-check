@@ -330,10 +330,11 @@ def _smtp_close(smtp: smtplib.SMTP) -> None:
             pass
 
 
-def verificar_email(email: str, timeout: int = SMTP_TIMEOUT) -> dict:
+def verificar_email(email: str, timeout: int = SMTP_TIMEOUT, solo_dns: bool = False) -> dict:
     """
     Verifica si una direccion de correo es alcanzable.
     Retorna dict con: email, estado, causa, servidor_mx, smtp_codigo, tiempo_ms.
+    Si solo_dns=True omite la fase SMTP (util en redes corporativas con puerto 25 bloqueado).
     """
     email = email.strip().lower()
     t0 = time.time()
@@ -367,6 +368,15 @@ def verificar_email(email: str, timeout: int = SMTP_TIMEOUT) -> dict:
         return base
 
     base["servidor_mx"] = mx_records[0][1]
+
+    # Cortocircuito DNS-only (red corporativa / puerto 25 bloqueado)
+    if solo_dns:
+        base.update({
+            "estado": ESTADO_INC,
+            "causa": "Dominio con MX valido (verificacion SMTP omitida)",
+        })
+        base["tiempo_ms"] = round((time.time() - t0) * 1000, 1)
+        return base
 
     # Fase 3: SMTP
     smtp_result = _smtp_verify(email, mx_records, timeout)
@@ -550,6 +560,10 @@ class AppEmailGUI(tk.Tk):
         e.pack(side=tk.LEFT, padx=(6, 8), ipady=4)
         e.bind("<Return>", lambda _: self._verificar_individual())
         _mac_btn(row, "VERIFICAR", self._verificar_individual, inverted=True).pack(side=tk.LEFT)
+        self._solo_dns_ind = tk.BooleanVar(value=False)
+        tk.Checkbutton(row, text="Solo DNS", variable=self._solo_dns_ind,
+                       bg=BG, fg=FG, font=FONT, activebackground=BG,
+                       selectcolor=BG).pack(side=tk.LEFT, padx=(10, 0))
 
         self._lbl_err_ind = tk.Label(p, text="", bg=BG, fg=LOG_ERR,
                                       font=FONT_SMALL, anchor="w")
@@ -619,6 +633,10 @@ class AppEmailGUI(tk.Tk):
         self._timeout_var = tk.IntVar(value=10)
         _spinbox(opts_row, self._timeout_var, 5, 30, 5, width=4).pack(
             side=tk.LEFT, padx=(4, 0), ipady=2)
+        self._solo_dns_mas = tk.BooleanVar(value=False)
+        tk.Checkbutton(opts_row, text="Solo DNS (red corporativa)", variable=self._solo_dns_mas,
+                       bg=BG, fg=FG, font=FONT, activebackground=BG,
+                       selectcolor=BG).pack(side=tk.LEFT, padx=(16, 0))
 
         # Barra de progreso
         prog_row = tk.Frame(p, bg=BG)
@@ -780,7 +798,7 @@ class AppEmailGUI(tk.Tk):
                 timeout = int(self._timeout_var.get())
             except Exception:
                 pass
-            resultado = verificar_email(email, timeout)
+            resultado = verificar_email(email, timeout, solo_dns=self._solo_dns_ind.get())
             self.after(0, lambda r=resultado: self._mostrar_individual(r))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -900,12 +918,14 @@ class AppEmailGUI(tk.Tk):
                 self._status_var.set(f"Verificando {d}/{total}..."),
             ))
 
+        solo_dns = self._solo_dns_mas.get()
+
         def _worker_thread() -> None:
             def _check_one(email: str) -> dict:
                 if not self._running:
                     return {"email": email, "estado": "CANCELADO", "causa": "Cancelado por usuario",
                             "servidor_mx": None, "smtp_codigo": None, "tiempo_ms": 0.0}
-                return verificar_email(email, timeout)
+                return verificar_email(email, timeout, solo_dns=solo_dns)
 
             try:
                 with ThreadPoolExecutor(max_workers=workers) as pool:
